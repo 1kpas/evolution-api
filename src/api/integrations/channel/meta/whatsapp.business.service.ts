@@ -295,15 +295,29 @@ export class BusinessStartupService extends ChannelStartupService {
     try {
       let messageRaw: any;
       let pushName: any;
-
+      let sourceValue = 'unknown'; // Valor padrão para source
+  
+      // Detectar origem da mensagem a partir das informações de referral
+      if (received.messages && received.messages[0]?.referral) {
+        const referral = received.messages[0].referral;
+        
+        // Construir um source que contém as informações de marketing
+        if (referral.source_type && referral.ctwa_clid) {
+          sourceValue = `${referral.source_type}:${referral.ctwa_clid}:${referral.source_id || 'unknown'}`;
+        } else if (referral.source_type) {
+          sourceValue = `${referral.source_type}:unknown:${referral.source_id || 'unknown'}`;
+        }
+      }
+  
       if (received.contacts) pushName = received.contacts[0].profile.name;
-
+  
       if (received.messages) {
         const key = {
           id: received.messages[0].id,
           remoteJid: this.phoneNumber,
           fromMe: received.messages[0].from === received.metadata.phone_number_id,
         };
+        
         if (this.isMediaMessage(received?.messages[0])) {
           messageRaw = {
             key,
@@ -312,25 +326,25 @@ export class BusinessStartupService extends ChannelStartupService {
             contextInfo: this.messageMediaJson(received)?.contextInfo,
             messageType: this.renderMessageType(received.messages[0].type),
             messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
+            source: sourceValue,
             instanceId: this.instanceId,
           };
-
+  
           if (this.configService.get<S3>('S3').ENABLE) {
             try {
               const message: any = received;
-
+  
               const id = message.messages[0][message.messages[0].type].id;
               let urlServer = this.configService.get<WaBusiness>('WA_BUSINESS').URL;
               const version = this.configService.get<WaBusiness>('WA_BUSINESS').VERSION;
               urlServer = `${urlServer}/${version}/${id}`;
               const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` };
               const result = await axios.get(urlServer, { headers });
-
+  
               const buffer = await axios.get(result.data.url, { headers, responseType: 'arraybuffer' });
-
+  
               let mediaType;
-
+  
               if (message.messages[0].document) {
                 mediaType = 'document';
               } else if (message.messages[0].image) {
@@ -340,9 +354,9 @@ export class BusinessStartupService extends ChannelStartupService {
               } else {
                 mediaType = 'video';
               }
-
+  
               const mimetype = result.data?.mime_type || result.headers['content-type'];
-
+  
               const contentDisposition = result.headers['content-disposition'];
               let fileName = `${message.messages[0].id}.${mimetype.split('/')[1]}`;
               if (contentDisposition) {
@@ -351,19 +365,19 @@ export class BusinessStartupService extends ChannelStartupService {
                   fileName = match[1];
                 }
               }
-
+  
               const size = result.headers['content-length'] || buffer.data.byteLength;
-
+  
               const fullName = join(`${this.instance.id}`, key.remoteJid, mediaType, fileName);
-
+  
               await s3Service.uploadFile(fullName, buffer.data, size, {
                 'Content-Type': mimetype,
               });
-
+  
               const createdMessage = await this.prismaRepository.message.create({
                 data: messageRaw,
               });
-
+  
               await this.prismaRepository.media.create({
                 data: {
                   messageId: createdMessage.id,
@@ -373,9 +387,9 @@ export class BusinessStartupService extends ChannelStartupService {
                   mimetype,
                 },
               });
-
+  
               const mediaUrl = await s3Service.getObjectUrl(fullName);
-
+  
               messageRaw.message.mediaUrl = mediaUrl;
               messageRaw.message.base64 = buffer.data.toString('base64');
             } catch (error) {
@@ -383,7 +397,7 @@ export class BusinessStartupService extends ChannelStartupService {
             }
           } else {
             const buffer = await this.downloadMediaMessage(received?.messages[0]);
-
+  
             messageRaw.message.base64 = buffer.toString('base64');
           }
         } else if (received?.messages[0].interactive) {
@@ -396,7 +410,7 @@ export class BusinessStartupService extends ChannelStartupService {
             contextInfo: this.messageInteractiveJson(received)?.contextInfo,
             messageType: 'interactiveMessage',
             messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
+            source: sourceValue,
             instanceId: this.instanceId,
           };
         } else if (received?.messages[0].button) {
@@ -409,7 +423,7 @@ export class BusinessStartupService extends ChannelStartupService {
             contextInfo: this.messageButtonJson(received)?.contextInfo,
             messageType: 'buttonMessage',
             messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
+            source: sourceValue,
             instanceId: this.instanceId,
           };
         } else if (received?.messages[0].reaction) {
@@ -422,7 +436,7 @@ export class BusinessStartupService extends ChannelStartupService {
             contextInfo: this.messageReactionJson(received)?.contextInfo,
             messageType: 'reactionMessage',
             messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
+            source: sourceValue,
             instanceId: this.instanceId,
           };
         } else if (received?.messages[0].contacts) {
@@ -435,7 +449,7 @@ export class BusinessStartupService extends ChannelStartupService {
             contextInfo: this.messageContactsJson(received)?.contextInfo,
             messageType: 'contactMessage',
             messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
+            source: sourceValue,
             instanceId: this.instanceId,
           };
         } else {
@@ -446,15 +460,15 @@ export class BusinessStartupService extends ChannelStartupService {
             contextInfo: this.messageTextJson(received)?.contextInfo,
             messageType: this.renderMessageType(received.messages[0].type),
             messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
+            source: sourceValue,
             instanceId: this.instanceId,
           };
         }
-
+  
         if (this.localSettings.readMessages) {
           // await this.client.readMessages([received.key]);
         }
-
+  
         if (this.configService.get<Openai>('OPENAI').ENABLED) {
           const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
             where: {
@@ -464,9 +478,9 @@ export class BusinessStartupService extends ChannelStartupService {
               OpenaiCreds: true,
             },
           });
-
+  
           const audioMessage = received?.messages[0]?.audio;
-
+  
           if (
             openAiDefaultSettings &&
             openAiDefaultSettings.openaiCredsId &&
@@ -485,53 +499,53 @@ export class BusinessStartupService extends ChannelStartupService {
             );
           }
         }
-
+  
         this.logger.log(messageRaw);
-
+  
         this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
-
+  
         await chatbotController.emit({
           instance: { instanceName: this.instance.name, instanceId: this.instanceId },
           remoteJid: messageRaw.key.remoteJid,
           msg: messageRaw,
           pushName: messageRaw.pushName,
         });
-
+  
         if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
           const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
             Events.MESSAGES_UPSERT,
             { instanceName: this.instance.name, instanceId: this.instanceId },
             messageRaw,
           );
-
+  
           if (chatwootSentMessage?.id) {
             messageRaw.chatwootMessageId = chatwootSentMessage.id;
             messageRaw.chatwootInboxId = chatwootSentMessage.id;
             messageRaw.chatwootConversationId = chatwootSentMessage.id;
           }
         }
-
+  
         if (!this.isMediaMessage(received?.messages[0])) {
           await this.prismaRepository.message.create({
             data: messageRaw,
           });
         }
-
+  
         const contact = await this.prismaRepository.contact.findFirst({
           where: { instanceId: this.instanceId, remoteJid: key.remoteJid },
         });
-
+  
         const contactRaw: any = {
           remoteJid: received.contacts[0].profile.phone,
           pushName,
           // profilePicUrl: '',
           instanceId: this.instanceId,
         };
-
+  
         if (contactRaw.remoteJid === 'status@broadcast') {
           return;
         }
-
+  
         if (contact) {
           const contactRaw: any = {
             remoteJid: received.contacts[0].profile.phone,
@@ -539,9 +553,9 @@ export class BusinessStartupService extends ChannelStartupService {
             // profilePicUrl: '',
             instanceId: this.instanceId,
           };
-
+  
           this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
-
+  
           if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
             await this.chatwootService.eventWhatsapp(
               Events.CONTACTS_UPDATE,
@@ -549,16 +563,16 @@ export class BusinessStartupService extends ChannelStartupService {
               contactRaw,
             );
           }
-
+  
           await this.prismaRepository.contact.updateMany({
             where: { remoteJid: contact.remoteJid },
             data: contactRaw,
           });
           return;
         }
-
+  
         this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
-
+  
         this.prismaRepository.contact.create({
           data: contactRaw,
         });
@@ -583,14 +597,14 @@ export class BusinessStartupService extends ChannelStartupService {
                 },
               },
             });
-
+  
             if (!findMessage) {
               return;
             }
-
+  
             if (item.message === null && item.status === undefined) {
               this.sendDataWebhook(Events.MESSAGES_DELETE, key);
-
+  
               const message: any = {
                 messageId: findMessage.id,
                 keyId: key.id,
@@ -600,11 +614,11 @@ export class BusinessStartupService extends ChannelStartupService {
                 status: 'DELETED',
                 instanceId: this.instanceId,
               };
-
+  
               await this.prismaRepository.messageUpdate.create({
                 data: message,
               });
-
+  
               if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
                 this.chatwootService.eventWhatsapp(
                   Events.MESSAGES_DELETE,
@@ -612,10 +626,10 @@ export class BusinessStartupService extends ChannelStartupService {
                   { key: key },
                 );
               }
-
+  
               return;
             }
-
+  
             const message: any = {
               messageId: findMessage.id,
               keyId: key.id,
@@ -625,13 +639,13 @@ export class BusinessStartupService extends ChannelStartupService {
               status: item.status.toUpperCase(),
               instanceId: this.instanceId,
             };
-
+  
             this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
-
+  
             await this.prismaRepository.messageUpdate.create({
               data: message,
             });
-
+  
             if (findMessage.webhookUrl) {
               await axios.post(findMessage.webhookUrl, message);
             }
@@ -642,7 +656,7 @@ export class BusinessStartupService extends ChannelStartupService {
       this.logger.error(error);
     }
   }
-
+  
   private convertMessageToRaw(message: any, content: any) {
     let convertMessage: any;
 
