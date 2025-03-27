@@ -291,236 +291,262 @@ export class BusinessStartupService extends ChannelStartupService {
     return messageType;
   }
 
-  protected async messageHandle(received: any, database: Database, settings: any) {
-    try {
-      let messageRaw: any;
-      let pushName: any;
+protected async messageHandle(received: any, database: Database, settings: any) {
+  try {
+    let messageRaw: any;
+    let pushName: any;
+    let sourceValue = 'unknown'; // Valor padrão para source
 
-      if (received.contacts) pushName = received.contacts[0].profile.name;
+    // Detectar origem da mensagem a partir das informações de referral
+    if (received.messages && received.messages[0]?.referral) {
+      const referral = received.messages[0].referral;
+      
+      // Construir um source que contém as informações de marketing
+      if (referral.source_type && referral.ctwa_clid) {
+        sourceValue = `${referral.source_type}:${referral.ctwa_clid}:${referral.source_id || 'unknown'}`;
+      } else if (referral.source_type) {
+        sourceValue = `${referral.source_type}:unknown:${referral.source_id || 'unknown'}`;
+      }
+    }
 
-      if (received.messages) {
-        const key = {
-          id: received.messages[0].id,
-          remoteJid: this.phoneNumber,
-          fromMe: received.messages[0].from === received.metadata.phone_number_id,
+    if (received.contacts) pushName = received.contacts[0].profile.name;
+
+    if (received.messages) {
+      const key = {
+        id: received.messages[0].id,
+        remoteJid: this.phoneNumber,
+        fromMe: received.messages[0].from === received.metadata.phone_number_id,
+      };
+      
+      if (this.isMediaMessage(received?.messages[0])) {
+        messageRaw = {
+          key,
+          pushName,
+          message: this.messageMediaJson(received),
+          contextInfo: this.messageMediaJson(received)?.contextInfo,
+          messageType: this.renderMessageType(received.messages[0].type),
+          messageTimestamp: parseInt(received.messages[0].timestamp) as number,
+          source: sourceValue,
+          instanceId: this.instanceId,
         };
-        if (this.isMediaMessage(received?.messages[0])) {
-          messageRaw = {
-            key,
-            pushName,
-            message: this.messageMediaJson(received),
-            contextInfo: this.messageMediaJson(received)?.contextInfo,
-            messageType: this.renderMessageType(received.messages[0].type),
-            messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
-            instanceId: this.instanceId,
-          };
 
-          if (this.configService.get<S3>('S3').ENABLE) {
-            try {
-              const message: any = received;
+        if (this.configService.get<S3>('S3').ENABLE) {
+          try {
+            const message: any = received;
 
-              const id = message.messages[0][message.messages[0].type].id;
-              let urlServer = this.configService.get<WaBusiness>('WA_BUSINESS').URL;
-              const version = this.configService.get<WaBusiness>('WA_BUSINESS').VERSION;
-              urlServer = `${urlServer}/${version}/${id}`;
-              const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` };
-              const result = await axios.get(urlServer, { headers });
+            const id = message.messages[0][message.messages[0].type].id;
+            let urlServer = this.configService.get<WaBusiness>('WA_BUSINESS').URL;
+            const version = this.configService.get<WaBusiness>('WA_BUSINESS').VERSION;
+            urlServer = `${urlServer}/${version}/${id}`;
+            const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${this.token}` };
+            const result = await axios.get(urlServer, { headers });
 
-              const buffer = await axios.get(result.data.url, { headers, responseType: 'arraybuffer' });
+            const buffer = await axios.get(result.data.url, { headers, responseType: 'arraybuffer' });
 
-              let mediaType;
+            let mediaType;
 
-              if (message.messages[0].document) {
-                mediaType = 'document';
-              } else if (message.messages[0].image) {
-                mediaType = 'image';
-              } else if (message.messages[0].audio) {
-                mediaType = 'audio';
-              } else {
-                mediaType = 'video';
-              }
-
-              const mimetype = result.data?.mime_type || result.headers['content-type'];
-
-              const contentDisposition = result.headers['content-disposition'];
-              let fileName = `${message.messages[0].id}.${mimetype.split('/')[1]}`;
-              if (contentDisposition) {
-                const match = contentDisposition.match(/filename="(.+?)"/);
-                if (match) {
-                  fileName = match[1];
-                }
-              }
-
-              const size = result.headers['content-length'] || buffer.data.byteLength;
-
-              const fullName = join(`${this.instance.id}`, key.remoteJid, mediaType, fileName);
-
-              await s3Service.uploadFile(fullName, buffer.data, size, {
-                'Content-Type': mimetype,
-              });
-
-              const createdMessage = await this.prismaRepository.message.create({
-                data: messageRaw,
-              });
-
-              await this.prismaRepository.media.create({
-                data: {
-                  messageId: createdMessage.id,
-                  instanceId: this.instanceId,
-                  type: mediaType,
-                  fileName: fullName,
-                  mimetype,
-                },
-              });
-
-              const mediaUrl = await s3Service.getObjectUrl(fullName);
-
-              messageRaw.message.mediaUrl = mediaUrl;
-              messageRaw.message.base64 = buffer.data.toString('base64');
-            } catch (error) {
-              this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
+            if (message.messages[0].document) {
+              mediaType = 'document';
+            } else if (message.messages[0].image) {
+              mediaType = 'image';
+            } else if (message.messages[0].audio) {
+              mediaType = 'audio';
+            } else {
+              mediaType = 'video';
             }
-          } else {
-            const buffer = await this.downloadMediaMessage(received?.messages[0]);
 
-            messageRaw.message.base64 = buffer.toString('base64');
-          }
-        } else if (received?.messages[0].interactive) {
-          messageRaw = {
-            key,
-            pushName,
-            message: {
-              ...this.messageInteractiveJson(received),
-            },
-            contextInfo: this.messageInteractiveJson(received)?.contextInfo,
-            messageType: 'interactiveMessage',
-            messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
-            instanceId: this.instanceId,
-          };
-        } else if (received?.messages[0].button) {
-          messageRaw = {
-            key,
-            pushName,
-            message: {
-              ...this.messageButtonJson(received),
-            },
-            contextInfo: this.messageButtonJson(received)?.contextInfo,
-            messageType: 'buttonMessage',
-            messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
-            instanceId: this.instanceId,
-          };
-        } else if (received?.messages[0].reaction) {
-          messageRaw = {
-            key,
-            pushName,
-            message: {
-              ...this.messageReactionJson(received),
-            },
-            contextInfo: this.messageReactionJson(received)?.contextInfo,
-            messageType: 'reactionMessage',
-            messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
-            instanceId: this.instanceId,
-          };
-        } else if (received?.messages[0].contacts) {
-          messageRaw = {
-            key,
-            pushName,
-            message: {
-              ...this.messageContactsJson(received),
-            },
-            contextInfo: this.messageContactsJson(received)?.contextInfo,
-            messageType: 'contactMessage',
-            messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
-            instanceId: this.instanceId,
-          };
-        } else {
-          messageRaw = {
-            key,
-            pushName,
-            message: this.messageTextJson(received),
-            contextInfo: this.messageTextJson(received)?.contextInfo,
-            messageType: this.renderMessageType(received.messages[0].type),
-            messageTimestamp: parseInt(received.messages[0].timestamp) as number,
-            source: 'unknown',
-            instanceId: this.instanceId,
-          };
-        }
+            const mimetype = result.data?.mime_type || result.headers['content-type'];
 
-        if (this.localSettings.readMessages) {
-          // await this.client.readMessages([received.key]);
-        }
+            const contentDisposition = result.headers['content-disposition'];
+            let fileName = `${message.messages[0].id}.${mimetype.split('/')[1]}`;
+            if (contentDisposition) {
+              const match = contentDisposition.match(/filename="(.+?)"/);
+              if (match) {
+                fileName = match[1];
+              }
+            }
 
-        if (this.configService.get<Openai>('OPENAI').ENABLED) {
-          const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
-            where: {
-              instanceId: this.instanceId,
-            },
-            include: {
-              OpenaiCreds: true,
-            },
-          });
+            const size = result.headers['content-length'] || buffer.data.byteLength;
 
-          const audioMessage = received?.messages[0]?.audio;
+            const fullName = join(`${this.instance.id}`, key.remoteJid, mediaType, fileName);
 
-          if (
-            openAiDefaultSettings &&
-            openAiDefaultSettings.openaiCredsId &&
-            openAiDefaultSettings.speechToText &&
-            audioMessage
-          ) {
-            messageRaw.message.speechToText = await this.openaiService.speechToText(
-              openAiDefaultSettings.OpenaiCreds,
-              {
-                message: {
-                  mediaUrl: messageRaw.message.mediaUrl,
-                  ...messageRaw,
-                },
+            await s3Service.uploadFile(fullName, buffer.data, size, {
+              'Content-Type': mimetype,
+            });
+
+            const createdMessage = await this.prismaRepository.message.create({
+              data: messageRaw,
+            });
+
+            await this.prismaRepository.media.create({
+              data: {
+                messageId: createdMessage.id,
+                instanceId: this.instanceId,
+                type: mediaType,
+                fileName: fullName,
+                mimetype,
               },
-              () => {},
-            );
+            });
+
+            const mediaUrl = await s3Service.getObjectUrl(fullName);
+
+            messageRaw.message.mediaUrl = mediaUrl;
+            messageRaw.message.base64 = buffer.data.toString('base64');
+          } catch (error) {
+            this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
           }
+        } else {
+          const buffer = await this.downloadMediaMessage(received?.messages[0]);
+
+          messageRaw.message.base64 = buffer.toString('base64');
         }
+      } else if (received?.messages[0].interactive) {
+        messageRaw = {
+          key,
+          pushName,
+          message: {
+            ...this.messageInteractiveJson(received),
+          },
+          contextInfo: this.messageInteractiveJson(received)?.contextInfo,
+          messageType: 'interactiveMessage',
+          messageTimestamp: parseInt(received.messages[0].timestamp) as number,
+          source: sourceValue,
+          instanceId: this.instanceId,
+        };
+      } else if (received?.messages[0].button) {
+        messageRaw = {
+          key,
+          pushName,
+          message: {
+            ...this.messageButtonJson(received),
+          },
+          contextInfo: this.messageButtonJson(received)?.contextInfo,
+          messageType: 'buttonMessage',
+          messageTimestamp: parseInt(received.messages[0].timestamp) as number,
+          source: sourceValue,
+          instanceId: this.instanceId,
+        };
+      } else if (received?.messages[0].reaction) {
+        messageRaw = {
+          key,
+          pushName,
+          message: {
+            ...this.messageReactionJson(received),
+          },
+          contextInfo: this.messageReactionJson(received)?.contextInfo,
+          messageType: 'reactionMessage',
+          messageTimestamp: parseInt(received.messages[0].timestamp) as number,
+          source: sourceValue,
+          instanceId: this.instanceId,
+        };
+      } else if (received?.messages[0].contacts) {
+        messageRaw = {
+          key,
+          pushName,
+          message: {
+            ...this.messageContactsJson(received),
+          },
+          contextInfo: this.messageContactsJson(received)?.contextInfo,
+          messageType: 'contactMessage',
+          messageTimestamp: parseInt(received.messages[0].timestamp) as number,
+          source: sourceValue,
+          instanceId: this.instanceId,
+        };
+      } else {
+        messageRaw = {
+          key,
+          pushName,
+          message: this.messageTextJson(received),
+          contextInfo: this.messageTextJson(received)?.contextInfo,
+          messageType: this.renderMessageType(received.messages[0].type),
+          messageTimestamp: parseInt(received.messages[0].timestamp) as number,
+          source: sourceValue,
+          instanceId: this.instanceId,
+        };
+      }
 
-        this.logger.log(messageRaw);
+      if (this.localSettings.readMessages) {
+        // await this.client.readMessages([received.key]);
+      }
 
-        this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
-
-        await chatbotController.emit({
-          instance: { instanceName: this.instance.name, instanceId: this.instanceId },
-          remoteJid: messageRaw.key.remoteJid,
-          msg: messageRaw,
-          pushName: messageRaw.pushName,
+      if (this.configService.get<Openai>('OPENAI').ENABLED) {
+        const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
+          where: {
+            instanceId: this.instanceId,
+          },
+          include: {
+            OpenaiCreds: true,
+          },
         });
 
-        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-          const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
-            Events.MESSAGES_UPSERT,
-            { instanceName: this.instance.name, instanceId: this.instanceId },
-            messageRaw,
+        const audioMessage = received?.messages[0]?.audio;
+
+        if (
+          openAiDefaultSettings &&
+          openAiDefaultSettings.openaiCredsId &&
+          openAiDefaultSettings.speechToText &&
+          audioMessage
+        ) {
+          messageRaw.message.speechToText = await this.openaiService.speechToText(
+            openAiDefaultSettings.OpenaiCreds,
+            {
+              message: {
+                mediaUrl: messageRaw.message.mediaUrl,
+                ...messageRaw,
+              },
+            },
+            () => {},
           );
-
-          if (chatwootSentMessage?.id) {
-            messageRaw.chatwootMessageId = chatwootSentMessage.id;
-            messageRaw.chatwootInboxId = chatwootSentMessage.id;
-            messageRaw.chatwootConversationId = chatwootSentMessage.id;
-          }
         }
+      }
 
-        if (!this.isMediaMessage(received?.messages[0])) {
-          await this.prismaRepository.message.create({
-            data: messageRaw,
-          });
+      this.logger.log(messageRaw);
+
+      this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
+
+      await chatbotController.emit({
+        instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+        remoteJid: messageRaw.key.remoteJid,
+        msg: messageRaw,
+        pushName: messageRaw.pushName,
+      });
+
+      if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+        const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
+          Events.MESSAGES_UPSERT,
+          { instanceName: this.instance.name, instanceId: this.instanceId },
+          messageRaw,
+        );
+
+        if (chatwootSentMessage?.id) {
+          messageRaw.chatwootMessageId = chatwootSentMessage.id;
+          messageRaw.chatwootInboxId = chatwootSentMessage.id;
+          messageRaw.chatwootConversationId = chatwootSentMessage.id;
         }
+      }
 
-        const contact = await this.prismaRepository.contact.findFirst({
-          where: { instanceId: this.instanceId, remoteJid: key.remoteJid },
+      if (!this.isMediaMessage(received?.messages[0])) {
+        await this.prismaRepository.message.create({
+          data: messageRaw,
         });
+      }
 
+      const contact = await this.prismaRepository.contact.findFirst({
+        where: { instanceId: this.instanceId, remoteJid: key.remoteJid },
+      });
+
+      const contactRaw: any = {
+        remoteJid: received.contacts[0].profile.phone,
+        pushName,
+        // profilePicUrl: '',
+        instanceId: this.instanceId,
+      };
+
+      if (contactRaw.remoteJid === 'status@broadcast') {
+        return;
+      }
+
+      if (contact) {
         const contactRaw: any = {
           remoteJid: received.contacts[0].profile.phone,
           pushName,
@@ -528,93 +554,56 @@ export class BusinessStartupService extends ChannelStartupService {
           instanceId: this.instanceId,
         };
 
-        if (contactRaw.remoteJid === 'status@broadcast') {
-          return;
+        this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
+
+        if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+          await this.chatwootService.eventWhatsapp(
+            Events.CONTACTS_UPDATE,
+            { instanceName: this.instance.name, instanceId: this.instanceId },
+            contactRaw,
+          );
         }
 
-        if (contact) {
-          const contactRaw: any = {
-            remoteJid: received.contacts[0].profile.phone,
-            pushName,
-            // profilePicUrl: '',
-            instanceId: this.instanceId,
-          };
-
-          this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
-
-          if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-            await this.chatwootService.eventWhatsapp(
-              Events.CONTACTS_UPDATE,
-              { instanceName: this.instance.name, instanceId: this.instanceId },
-              contactRaw,
-            );
-          }
-
-          await this.prismaRepository.contact.updateMany({
-            where: { remoteJid: contact.remoteJid },
-            data: contactRaw,
-          });
-          return;
-        }
-
-        this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
-
-        this.prismaRepository.contact.create({
+        await this.prismaRepository.contact.updateMany({
+          where: { remoteJid: contact.remoteJid },
           data: contactRaw,
         });
+        return;
       }
-      if (received.statuses) {
-        for await (const item of received.statuses) {
-          const key = {
-            id: item.id,
-            remoteJid: this.phoneNumber,
-            fromMe: this.phoneNumber === received.metadata.phone_number_id,
-          };
-          if (settings?.groups_ignore && key.remoteJid.includes('@g.us')) {
+
+      this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
+
+      this.prismaRepository.contact.create({
+        data: contactRaw,
+      });
+    }
+    if (received.statuses) {
+      for await (const item of received.statuses) {
+        const key = {
+          id: item.id,
+          remoteJid: this.phoneNumber,
+          fromMe: this.phoneNumber === received.metadata.phone_number_id,
+        };
+        if (settings?.groups_ignore && key.remoteJid.includes('@g.us')) {
+          return;
+        }
+        if (key.remoteJid !== 'status@broadcast' && !key?.remoteJid?.match(/(:\d+)/)) {
+          const findMessage = await this.prismaRepository.message.findFirst({
+            where: {
+              instanceId: this.instanceId,
+              key: {
+                path: ['id'],
+                equals: key.id,
+              },
+            },
+          });
+
+          if (!findMessage) {
             return;
           }
-          if (key.remoteJid !== 'status@broadcast' && !key?.remoteJid?.match(/(:\d+)/)) {
-            const findMessage = await this.prismaRepository.message.findFirst({
-              where: {
-                instanceId: this.instanceId,
-                key: {
-                  path: ['id'],
-                  equals: key.id,
-                },
-              },
-            });
 
-            if (!findMessage) {
-              return;
-            }
-
-            if (item.message === null && item.status === undefined) {
-              this.sendDataWebhook(Events.MESSAGES_DELETE, key);
-
-              const message: any = {
-                messageId: findMessage.id,
-                keyId: key.id,
-                remoteJid: key.remoteJid,
-                fromMe: key.fromMe,
-                participant: key?.remoteJid,
-                status: 'DELETED',
-                instanceId: this.instanceId,
-              };
-
-              await this.prismaRepository.messageUpdate.create({
-                data: message,
-              });
-
-              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-                this.chatwootService.eventWhatsapp(
-                  Events.MESSAGES_DELETE,
-                  { instanceName: this.instance.name, instanceId: this.instanceId },
-                  { key: key },
-                );
-              }
-
-              return;
-            }
+          if (item.message === null && item.status === undefined) {
+            this.sendDataWebhook(Events.MESSAGES_DELETE, key);
 
             const message: any = {
               messageId: findMessage.id,
@@ -622,26 +611,51 @@ export class BusinessStartupService extends ChannelStartupService {
               remoteJid: key.remoteJid,
               fromMe: key.fromMe,
               participant: key?.remoteJid,
-              status: item.status.toUpperCase(),
+              status: 'DELETED',
               instanceId: this.instanceId,
             };
-
-            this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
 
             await this.prismaRepository.messageUpdate.create({
               data: message,
             });
 
-            if (findMessage.webhookUrl) {
-              await axios.post(findMessage.webhookUrl, message);
+            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+              this.chatwootService.eventWhatsapp(
+                Events.MESSAGES_DELETE,
+                { instanceName: this.instance.name, instanceId: this.instanceId },
+                { key: key },
+              );
             }
+
+            return;
+          }
+
+          const message: any = {
+            messageId: findMessage.id,
+            keyId: key.id,
+            remoteJid: key.remoteJid,
+            fromMe: key.fromMe,
+            participant: key?.remoteJid,
+            status: item.status.toUpperCase(),
+            instanceId: this.instanceId,
+          };
+
+          this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
+
+          await this.prismaRepository.messageUpdate.create({
+            data: message,
+          });
+
+          if (findMessage.webhookUrl) {
+            await axios.post(findMessage.webhookUrl, message);
           }
         }
       }
-    } catch (error) {
-      this.logger.error(error);
     }
+  } catch (error) {
+    this.logger.error(error);
   }
+}
 
   private convertMessageToRaw(message: any, content: any) {
     let convertMessage: any;
